@@ -24,8 +24,8 @@ Sigue estos pasos para crear un entorno virtual aislado y evitar conflictos de d
 
 ### 1. Clonar el repositorio
 
-    git clone <URL_DE_TU_REPO>
-    cd <NOMBRE_DE_TU_REPO>
+    git clone https://github.com/AlfonsoZen/ProyectoFPGA.git
+    cd ProyectoFPGA
 
 ### 2. Crear el Entorno Virtual
 
