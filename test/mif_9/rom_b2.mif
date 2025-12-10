@@ -1,0 +1,18 @@
+DEPTH = 32;
+WIDTH = 8;
+ADDRESS_RADIX = DEC;
+DATA_RADIX = HEX;
+CONTENT
+BEGIN
+0 : C0;
+1 : 1A;
+2 : 0C;
+3 : 05;
+4 : 02;
+5 : 1B;
+6 : 0A;
+7 : F5;
+8 : FA;
+9 : F5;
+[10..31] : 00;
+END;
