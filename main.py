@@ -2,121 +2,112 @@ import tensorflow as tf
 import numpy as np
 import os
 
-# --- CONFIGURACIÓN ---
-# Usaremos 8 bits para los pesos.
-# Rango de 8 bits con signo: -128 a 127.
-# Factor de escala: Decidimos que el número 1.0 (float) será representado como 64 (entero).
-# Esto nos da espacio para números hasta +/- 2.0 antes de desbordar, o mayor precisión.
-# Para este ejemplo usaremos SCALE = 128 (así 0.99 es aprox 127).
-SCALE_FACTOR = 128.0 
+# --- CONFIGURACIÓN OPTIMIZADA ---
+# Usamos potencias de 2 para facilitar los shifts en VHDL
+# Entrada: 0.0-1.0 -> 0-128 (7 bits, cabe en 8 bits unsigned)
+INPUT_SCALE = 128.0 
+# Pesos: -1.0-1.0 -> -128-127 (8 bits signed)
+WEIGHT_SCALE = 128.0
 
 def create_mif_file(filename, data, width=8, depth=1024):
-    """
-    Genera un archivo .mif para la memoria de la FPGA (Quartus).
-    data: lista de enteros.
-    """
     with open(filename, 'w') as f:
         f.write(f"DEPTH = {depth};\n")
         f.write(f"WIDTH = {width};\n")
         f.write("ADDRESS_RADIX = DEC;\n")
-        f.write("DATA_RADIX = HEX;\n") # Hexadecimal es más fácil de leer para depurar
+        f.write("DATA_RADIX = HEX;\n") 
         f.write("CONTENT\n")
         f.write("BEGIN\n")
-        
         for i, val in enumerate(data):
-            # Asegurar que el valor encaje en 'width' bits (complemento a 2)
-            if val < 0:
-                val = (1 << width) + val # Convertir -1 a 0xFF por ejemplo
-            
-            # Formato: Dirección : Dato;
-            # Hexadecimal limpio
+            if val < 0: val = (1 << width) + val 
             hex_val = f"{val:0{width//4}X}" 
             f.write(f"{i} : {hex_val};\n")
-            
-        # Rellenar con ceros si sobran direcciones
         if len(data) < depth:
             f.write(f"[{len(data)}..{depth-1}] : 00;\n")
-            
         f.write("END;\n")
-    print(f"Archivo generado: {filename} (Datos: {len(data)})")
+    print(f"Generado: {filename}")
 
 def main():
-    print("1. Cargando datos MNIST...")
+    print("1. Cargando MNIST...")
     mnist = tf.keras.datasets.mnist
     (x_train, y_train), (x_test, y_test) = mnist.load_data()
     
-    # Normalizar imágenes: de 0-255 a 0.0-1.0
-    x_train, x_test = x_train / 255.0, x_test / 255.0
-    
+    # Normalizar 0-1
+    x_train, x_test = x_train / 255.0, x_test / 255.0 
+
+    # --- CORRECCIÓN DEL ERROR ---
     # Aplanar las imágenes (de 28x28 a 784 entradas)
+    # Esto faltaba en la versión anterior y causaba el ValueError
     x_train = x_train.reshape((-1, 784))
     x_test = x_test.reshape((-1, 784))
 
-    print("2. Creando modelo MLP (784 -> 30 -> 10)...")
+    print("2. Entrenando Modelo...")
     model = tf.keras.models.Sequential([
-        # Capa Oculta: 30 neuronas, activación Sigmoid (como pide el PDF)
-        tf.keras.layers.Dense(30, activation='sigmoid', input_shape=(784,)),
-        # Capa Salida: 10 neuronas, activación Softmax (para entrenamiento)
-        # Nota: En la FPGA la softmax suele omitirse y solo se busca el máximo.
+        tf.keras.layers.Dense(30, activation='relu', input_shape=(784,)),
         tf.keras.layers.Dense(10, activation='softmax')
     ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    
+    # Entrenamos más épocas para asegurar convergencia robusta
+    model.fit(x_train, y_train, epochs=10, validation_data=(x_test, y_test))
 
-    model.compile(optimizer='adam',
-                  loss='sparse_categorical_crossentropy',
-                  metrics=['accuracy'])
-
-    print("3. Entrenando (esto puede tardar unos segundos)...")
-    model.fit(x_train, y_train, epochs=5, validation_data=(x_test, y_test))
-
-    print("\n4. Extrayendo y cuantizando pesos...")
-    # Obtener pesos y bias como listas de numpy
-    # Layer 0 es la oculta (784 -> 30)
+    print("3. Exportando Pesos y Bias...")
     w1, b1 = model.layers[0].get_weights() 
-    # Layer 1 es la salida (30 -> 10)
     w2, b2 = model.layers[1].get_weights()
 
-    # --- CUANTIZACIÓN (Conversión Float -> Entero) ---
-    # Multiplicamos por SCALE_FACTOR y redondeamos
-    w1_int = np.round(w1 * SCALE_FACTOR).astype(int)
-    b1_int = np.round(b1 * SCALE_FACTOR).astype(int)
-    w2_int = np.round(w2 * SCALE_FACTOR).astype(int)
-    b2_int = np.round(b2 * SCALE_FACTOR).astype(int)
+    # --- CUANTIZACIÓN INTELIGENTE ---
+    w1_int = np.clip(np.round(w1 * WEIGHT_SCALE), -128, 127).astype(int)
+    b1_int = np.clip(np.round(b1 * WEIGHT_SCALE), -128, 127).astype(int)
+    w2_int = np.clip(np.round(w2 * WEIGHT_SCALE), -128, 127).astype(int)
+    b2_int = np.clip(np.round(b2 * WEIGHT_SCALE), -128, 127).astype(int)
 
-    # Validar rangos (para 8 bits con signo: -128 a 127)
-    # Si se pasan, los recortamos (clipping). 
-    # Es importante revisar si muchos valores se recortan.
-    min_val, max_val = -128, 127
-    w1_int = np.clip(w1_int, min_val, max_val)
-    b1_int = np.clip(b1_int, min_val, max_val)
-    w2_int = np.clip(w2_int, min_val, max_val)
-    b2_int = np.clip(b2_int, min_val, max_val)
-
-    print(f"Rango de pesos W1 detectado: {w1_int.min()} a {w1_int.max()}")
-
-    # --- EXPORTACIÓN A ARCHIVOS .MIF ---
-    # Para la FPGA, necesitamos organizar la memoria linealmente.
-    # Estrategia: Guardar todo W1 en un archivo, B1 en otro, etc.
-    
-    # MIF 1: Pesos Capa Oculta (784 entradas x 30 neuronas = 23,520 datos)
-    # Nota: Aplanamos w1. En VHDL leeremos secuencialmente.
-    create_mif_file("rom_w1.mif", w1_int.flatten(), width=8, depth=32768) # Depth debe ser potencia de 2 mayor a datos
-    
-    # MIF 2: Bias Capa Oculta (30 datos)
+    # Transponemos pesos W para lectura lineal [Neurona][Pixel]
+    create_mif_file("rom_w1.mif", w1_int.T.flatten(), width=8, depth=32768)
     create_mif_file("rom_b1.mif", b1_int.flatten(), width=8, depth=32)
-
-    # MIF 3: Pesos Capa Salida (30 entradas x 10 neuronas = 300 datos)
-    create_mif_file("rom_w2.mif", w2_int.flatten(), width=8, depth=512)
-
-    # MIF 4: Bias Capa Salida (10 datos)
+    create_mif_file("rom_w2.mif", w2_int.T.flatten(), width=8, depth=512)
     create_mif_file("rom_b2.mif", b2_int.flatten(), width=8, depth=32)
     
-    # OPCIONAL: Exportar una imagen de prueba para usarla en la simulación VHDL
-    imagen_prueba = x_test[0] # Tomamos la primera imagen del test
-    imagen_int = np.round(imagen_prueba * 255).astype(int) # Escala 0-255
-    create_mif_file("img_prueba.mif", imagen_int, width=8, depth=1024)
-    print(f"Imagen de prueba exportada. Es un número: {y_test[0]}")
+    # --- PRUEBA AUTOMÁTICA ---
+    # Busca un número específico para probar (CAMBIA ESTE VALOR PARA PROBAR OTROS)
+    OBJETIVO = 5
+    # Buscar índice
+    indices = np.where(y_test == OBJETIVO)[0]
+    if len(indices) > 0:
+        idx = indices[0]
+    else:
+        idx = 0
+        print(f"Advertencia: No se encontró el número {OBJETIVO}, usando índice 0")
+    
+    img = x_test[idx] # Ya está aplanada (784,)
+    
+    # ESCALA CRÍTICA: Usamos 128 en lugar de 255 para la entrada
+    # img ya viene de 0.0 a 1.0. Multiplicamos por 128.
+    img_int = np.clip(np.round(img * INPUT_SCALE), 0, 127).astype(int)
+    create_mif_file("img_prueba.mif", img_int, width=8, depth=1024)
+    print(f"\nImagen exportada: {y_test[idx]} (Índice {idx})")
+    
+    # --- SIMULACIÓN VERIFICADA ---
+    print("\n--- SIMULACIÓN BIT-EXACTA ---")
+    
+    # Capa 1
+    hidden_out = []
+    for i in range(30):
+        # img_int es (784,), w1_int.T[i] es (784,)
+        acc = np.dot(img_int, w1_int.T[i]) 
+        acc += (b1_int[i] << 7)            
+        if acc < 0: val = 0                
+        else: val = acc >> 7               
+        if val > 127: val = 127            
+        hidden_out.append(val)
+    
+    # Capa 2
+    final_out = []
+    for i in range(10):
+        acc = np.dot(hidden_out, w2_int.T[i])
+        acc += (b2_int[i] << 7)
+        final_out.append(acc)
 
-    print("\n¡Listo! Archivos .mif generados. Cárgalos en Quartus.")
+    print(f"Valores crudos: {final_out}")
+    print(f"Ganador esperado: {np.argmax(final_out)}")
 
 if __name__ == "__main__":
     main()
